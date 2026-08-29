@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Configurar WiFi — ESP32-S3 CamS3</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/script.js" defer></script>
+</head>
+<body class="config-body">
+  <div class="card">
+    <div class="card-header">
+      <div class="icon">📡</div>
+      <div>
+        <h1>Configurar WiFi</h1>
+        <p>ESP32-S3 CamS3 — Modo Estación</p>
+      </div>
+    </div>
+
+    <form id="wifi-form">
+      <div class="form-group">
+        <label for="ssid">SSID (nombre de la red)</label>
+        <input type="text" id="ssid" placeholder="MiRedWiFi" maxlength="31" required>
+      </div>
+      <div class="form-group">
+        <label for="password">Contraseña</label>
+        <input type="password" id="password" placeholder="••••••••" maxlength="63">
+      </div>
+
+      <label class="toggle-row">
+        <input type="checkbox" id="use-dhcp" checked>
+        Usar DHCP (asignación automática de IP)
+      </label>
+
+      <div id="static-ip-section">
+        <div class="form-group">
+          <label for="static-ip">Dirección IP estática</label>
+          <input type="text" id="static-ip" placeholder="192.168.1.100">
+        </div>
+        <div class="grid-2">
+          <div class="form-group">
+            <label for="static-gw">Gateway</label>
+            <input type="text" id="static-gw" placeholder="192.168.1.1">
+          </div>
+          <div class="form-group">
+            <label for="static-nm">Máscara de red</label>
+            <input type="text" id="static-nm" placeholder="255.255.255.0">
+          </div>
+        </div>
+      </div>
+
+      <button type="submit" class="btn-primary">💾 Guardar y Reiniciar</button>
+    </form>
+
+    <div id="status-msg"></div>
+    <a class="btn-secondary" href="/">← Volver a la cámara</a>
+  </div>
+</body>
+</html>

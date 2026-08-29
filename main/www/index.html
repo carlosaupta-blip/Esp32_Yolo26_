@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32-S3 CamS3</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/script.js" defer></script>
+</head>
+<body>
+  <!-- Imagen de cámara -->
+  <img id="cam-view" src="" alt="Camera Stream" style="display:none">
+  <div id="no-signal"><span>📷</span>Sin señal — pulsa Iniciar</div>
+
+  <!-- HUD de métricas (NO aparece en fotos descargadas) -->
+  <div id="metrics-hud">
+    <div class="hud-title">
+      <span id="ws-status-dot"></span> ESP32-S3 CamS3
+    </div>
+    <div class="hud-row">
+      <span class="hud-label">RAM libre:</span>
+      <span class="hud-val" id="m-ram">—</span>
+    </div>
+    <div class="hud-row">
+      <span class="hud-label">PSRAM libre:</span>
+      <span class="hud-val" id="m-psram">—</span>
+    </div>
+    <div class="hud-row">
+      <span class="hud-label">Modo:</span>
+      <span class="hud-val" id="m-mode">—</span>
+    </div>
+    <div class="hud-row">
+      <span class="hud-label">IP:</span>
+      <span class="hud-val" id="m-ip">—</span>
+    </div>
+    <div class="hud-row">
+      <span class="hud-label">Uptime:</span>
+      <span class="hud-val" id="m-up">—</span>
+    </div>
+    <div class="hud-row">
+      <span class="hud-label">Clientes WS:</span>
+      <span class="hud-val" id="m-clients">—</span>
+    </div>
+  </div>
+
+  <!-- Botones principales -->
+  <button id="btn-capture" title="Captura y descarga foto JPEG">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+      <path d="M12 15.2A3.2 3.2 0 0 1 8.8 12 3.2 3.2 0 0 1 12 8.8a3.2 3.2 0 0 1 3.2 3.2 3.2 3.2 0 0 1-3.2 3.2m0-13.2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/>
+    </svg>
+    Tomar Foto
+  </button>
+  <button id="btn-stream">▶ Iniciar</button>
+  <a id="btn-config" href="/config">⚙ Config WiFi</a>
+
+  <!-- Toggle panel controles -->
+  <div id="cam-panel-toggle" role="button" tabindex="0">🎛 Cámara</div>
+
+  <!-- Panel de controles de cámara -->
+  <div id="cam-panel">
+    <h3>🎛 Controles de Cámara</h3>
+
+    <div class="ctrl-group">
+      <label>Resolución</label>
+      <select id="s-framesize" data-cam="framesize">
+        <option value="13">128x128 (QQVGA2)</option>
+        <option value="0">160x120 (QQVGA)</option>
+        <option value="1">176x144 (QCIF)</option>
+        <option value="2">240x176 (HQVGA)</option>
+        <option value="3" selected>320x240 (QVGA)</option>
+        <option value="4">400x296 (CIF)</option>
+        <option value="5">480x320 (HVGA)</option>
+        <option value="6">640x480 (VGA)</option>
+        <option value="7">800x600 (SVGA)</option>
+        <option value="8">1024x768 (XGA)</option>
+        <option value="9">1280x720 (HD)</option>
+        <option value="10">1280x1024 (SXGA)</option>
+        <option value="11">1600x1200 (UXGA)</option>
+      </select>
+    </div>
+
+    <div class="ctrl-group">
+      <label>Calidad JPEG <span id="v-quality">13</span></label>
+      <input type="range" id="s-quality" data-cam="quality" min="0" max="63" value="13">
+    </div>
+
+    <div class="ctrl-group">
+      <label>Brillo <span id="v-brightness">0</span></label>
+      <input type="range" id="s-brightness" data-cam="brightness" min="-2" max="2" value="0">
+    </div>
+    <div class="ctrl-group">
+      <label>Contraste <span id="v-contrast">0</span></label>
+      <input type="range" id="s-contrast" data-cam="contrast" min="-2" max="2" value="0">
+    </div>
+    <div class="ctrl-group">
+      <label>Saturación <span id="v-saturation">0</span></label>
+      <input type="range" id="s-saturation" data-cam="saturation" min="-2" max="2" value="0">
+    </div>
+    <div class="ctrl-group">
+      <label>AE Level <span id="v-ae_level">0</span></label>
+      <input type="range" id="s-ae_level" data-cam="ae_level" min="-2" max="2" value="0">
+    </div>
+    <div class="ctrl-group">
+      <label>AGC Gain <span id="v-agc_gain">0</span></label>
+      <input type="range" id="s-agc_gain" data-cam="agc_gain" min="0" max="30" value="0">
+    </div>
+    <div class="ctrl-group">
+      <label>Gain Ceiling <span id="v-gainceiling">0</span></label>
+      <input type="range" id="s-gainceiling" data-cam="gainceiling" min="0" max="6" value="0">
+    </div>
+
+    <div class="ctrl-group">
+      <label>Efecto especial</label>
+      <select id="s-special_effect" data-cam="special_effect">
+        <option value="0">Sin efecto</option>
+        <option value="1">Negativo</option>
+        <option value="2">Escala grises</option>
+        <option value="3">Rojo</option>
+        <option value="4">Verde</option>
+        <option value="5">Azul</option>
+        <option value="6">Sepia</option>
+      </select>
+    </div>
+
+    <div class="ctrl-group">
+      <label>Balance de blancos</label>
+      <select id="s-wb_mode" data-cam="wb_mode">
+        <option value="0">Auto</option>
+        <option value="1">Soleado</option>
+        <option value="2">Nublado</option>
+        <option value="3">Oficina</option>
+        <option value="4">Casa</option>
+      </select>
+    </div>
+
+    <div class="ctrl-group">
+      <label>Nitidez <span id="v-sharpness">0</span></label>
+      <input type="range" id="s-sharpness" data-cam="sharpness" min="-2" max="2" value="0">
+    </div>
+    <div class="ctrl-group">
+      <label>Reducción ruido <span id="v-denoise">0</span></label>
+      <input type="range" id="s-denoise" data-cam="denoise" min="0" max="8" value="0">
+    </div>
+
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-hmirror" data-cam="hmirror">
+        Espejo Horizontal
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-vflip" data-cam="vflip">
+        Voltear Vertical
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-awb" data-cam="awb" checked>
+        AWB automático
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-awb_gain" data-cam="awb_gain" checked>
+        AWB Gain
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-aec" data-cam="aec" checked>
+        AEC (exposición auto)
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-aec2" data-cam="aec2">
+        AEC2 (noche)
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-agc" data-cam="agc" checked>
+        AGC (ganancia auto)
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-bpc" data-cam="bpc">
+        BPC (black pixel)
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-wpc" data-cam="wpc" checked>
+        WPC (white pixel)
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-raw_gma" data-cam="raw_gma" checked>
+        Raw GMA
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-lenc" data-cam="lenc" checked>
+        LENC (lens corr)
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-dcw" data-cam="dcw">
+        DCW (downsize)
+      </label>
+    </div>
+    <div class="ctrl-group">
+      <label class="ctrl-toggle">
+        <input type="checkbox" id="s-colorbar" data-cam="colorbar">
+        Barra de color (test)
+      </label>
+    </div>
+
+    <!-- Control de Flash LED -->
+    <div class="ctrl-group flash-group">
+      <label>Flash LED <span id="v-flash_intensity">0%</span></label>
+      <input type="range" id="s-flash_intensity" data-cam="flash_intensity" min="0" max="100" value="0">
+    </div>
+
+    <span id="panel-close" role="button">✕ Cerrar panel</span>
+  </div>
+</body>
+</html>
