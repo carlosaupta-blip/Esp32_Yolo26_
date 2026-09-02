@@ -9,7 +9,10 @@ idf_component_register(
         "stream_server.c"
         "led_ctrl.c"
         "metrics.c"
+        "yolo_bridge.cpp"
     INCLUDE_DIRS "."
+    EMBED_FILES
+        "models/yolo26n_quantized.espdl"
     REQUIRES
         esp_wifi
         esp_http_server

@@ -18,3 +18,4 @@ dependencies:
   espressif/led_strip: ^3.0.3
   espressif/cjson: ^1.7.19~2
   espressif/esp_websocket_client: ^1.8.0
+  espressif/esp-dl: ^3.3.8

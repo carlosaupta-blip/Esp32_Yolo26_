@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ESP32-S3 CamS3</title>
@@ -220,7 +221,10 @@
         Barra de color (test)
       </label>
     </div>
-
+    <div class="ctrl-group">
+        <label>Umbral YOLO <span id="v-threshold">0.25</span></label>
+        <input type="range" id="s-threshold" min="0.01" max="0.99" step="0.01" value="0.25">
+    </div>
     <!-- Control de Flash LED -->
     <div class="ctrl-group flash-group">
       <label>Flash LED <span id="v-flash_intensity">0%</span></label>

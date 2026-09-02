@@ -5,16 +5,24 @@
 #include "lwip/sockets.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include <string.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include "yolo_frame.h"
 
 static const char *TAG = "stream_srv";
+
+static int s_active_clients = 0;
 
 #define STREAM_PORT 81
 #define PART_BOUNDARY "123456789000000000000987654321"
 static const char* STREAM_CONTENT_TYPE = "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace;boundary=" PART_BOUNDARY "\r\n\r\n";
 static const char* STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+// Cola para enviar frames JPEG a la tarea de inferencia YOLO
+extern QueueHandle_t yolo_frame_queue;
 
 static void stream_task(void *arg) {
     int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -56,7 +64,7 @@ static void stream_task(void *arg) {
             ESP_LOGE(TAG, "Error en accept");
             continue;
         }
-
+        s_active_clients++;
         ESP_LOGI(TAG, "Cliente conectado al streaming");
 
         // Enviar cabeceras HTTP
@@ -67,6 +75,20 @@ static void stream_task(void *arg) {
             if (!fb) {
                 ESP_LOGE(TAG, "Fallo al capturar frame");
                 break;
+            }
+
+            // Copiar el JPEG para YOLO antes de liberarlo
+            // Copiar el JPEG para YOLO antes de liberarlo
+            if (yolo_frame_queue) {
+                ESP_LOGI(TAG, "Encolando frame JPEG para YOLO (%d bytes)", fb->len);
+                uint8_t *yolo_copy = malloc(fb->len);
+                if (yolo_copy) {
+                    memcpy(yolo_copy, fb->buf, fb->len);
+                    yolo_frame_t yf = { .buf = yolo_copy, .len = fb->len };
+                    if (xQueueSend(yolo_frame_queue, &yf, 0) != pdTRUE) {
+                        free(yolo_copy); // Cola llena, descartar
+                    }
+                }
             }
 
             // Enviar boundary
@@ -89,11 +111,12 @@ static void stream_task(void *arg) {
                 break;
             }
 
+            // Liberar frame original después de enviarlo y copiarlo
             camera_return_frame(fb);
 
             vTaskDelay(pdMS_TO_TICKS(50)); // ~20 fps
         }
-
+        s_active_clients--;
         close(client_sock);
         ESP_LOGI(TAG, "Cliente desconectado");
     }
@@ -103,6 +126,10 @@ static void stream_task(void *arg) {
 }
 
 esp_err_t stream_server_start(void) {
-    xTaskCreatePinnedToCore(stream_task, "stream_srv", 8192, NULL, 10, NULL, 1);
+    xTaskCreatePinnedToCore(stream_task, "stream_srv", 8192, NULL, 10, NULL, 0);
     return ESP_OK;
+}
+
+int stream_server_get_active_clients(void) {
+    return s_active_clients;
 }

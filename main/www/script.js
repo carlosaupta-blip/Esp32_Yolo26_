@@ -50,6 +50,20 @@ function initCameraPage() {
     }
   });
 
+  const thresholdSlider = document.getElementById('s-threshold');
+  const thresholdLabel = document.getElementById('v-threshold');
+  thresholdSlider.addEventListener('input', () => {
+      thresholdLabel.textContent = thresholdSlider.value;
+      clearTimeout(window.thresholdDebounce);
+      window.thresholdDebounce = setTimeout(() => {
+          fetch('/api/threshold', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ threshold: parseFloat(thresholdSlider.value) })
+          });
+      }, 200);
+  });
+
   /* ---------- Panel lateral ---------- */
   const panelToggle = document.getElementById('cam-panel-toggle');
   const panel = document.getElementById('cam-panel');

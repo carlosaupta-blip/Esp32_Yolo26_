@@ -47,6 +47,31 @@ static esp_err_t send_file(httpd_req_t *req, const char *path, const char *mime_
     return res;
 }
 
+static esp_err_t threshold_post_handler(httpd_req_t *req) {
+    char content[64];
+    int received = httpd_req_recv(req, content, sizeof(content)-1);
+    if (received <= 0) return ESP_FAIL;
+    content[received] = 0;
+
+    cJSON *json = cJSON_Parse(content);
+    if (!json) return ESP_FAIL;
+
+    cJSON *item = cJSON_GetObjectItem(json, "threshold");
+    if (item && cJSON_IsNumber(item)) {
+        extern float yolo_threshold;   // declarar acceso
+        yolo_threshold = (float)item->valuedouble;
+    }
+
+    cJSON_Delete(json);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+static esp_err_t favicon_get_handler(httpd_req_t *req) {
+    return send_file(req, "/favicon.ico", "image/x-icon");
+}
+
 /* ---------------------------------------------------------------------
  * GET /
  * ------------------------------------------------------------------- */
@@ -214,10 +239,10 @@ esp_err_t web_server_start(void) {
 
     // Streaming MJPEG (reemplaza al WebSocket)
     uri.uri = "/api/stream";  uri.method = HTTP_GET;  uri.handler = mjpeg_stream_handler;    uri.user_ctx = NULL; httpd_register_uri_handler(server, &uri);
-
+    uri.uri = "/api/threshold"; uri.method = HTTP_POST; uri.handler = threshold_post_handler; httpd_register_uri_handler(server, &uri);
     uri.uri = "/api/metrics"; uri.method = HTTP_GET;  uri.handler = metrics_get_handler;     httpd_register_uri_handler(server, &uri);
     uri.uri = "/api/wifi";    uri.method = HTTP_POST; uri.handler = wifi_api_post_handler;   httpd_register_uri_handler(server, &uri);
-
+    uri.uri = "/favicon.ico"; uri.method = HTTP_GET; uri.handler = favicon_get_handler; httpd_register_uri_handler(server, &uri);
     ESP_LOGW(TAG, "Servidor HTTP iniciado en puerto 80");
     return ESP_OK;
 }
