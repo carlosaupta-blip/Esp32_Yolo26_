@@ -80,11 +80,14 @@ static void stream_task(void *arg) {
             // Copiar el JPEG para YOLO antes de liberarlo
             // Copiar el JPEG para YOLO antes de liberarlo
             if (yolo_frame_queue) {
-                ESP_LOGI(TAG, "Encolando frame JPEG para YOLO (%d bytes)", fb->len);
+                //ESP_LOGI(TAG, "Encolando frame JPEG para YOLO (%d bytes)", fb->len);
                 uint8_t *yolo_copy = malloc(fb->len);
                 if (yolo_copy) {
                     memcpy(yolo_copy, fb->buf, fb->len);
-                    yolo_frame_t yf = { .buf = yolo_copy, .len = fb->len };
+                    yolo_frame_t yf = { .buf = yolo_copy, 
+                        .len = fb->len,
+                        .width = fb->width,
+                        .height = fb->height};
                     if (xQueueSend(yolo_frame_queue, &yf, 0) != pdTRUE) {
                         free(yolo_copy); // Cola llena, descartar
                     }

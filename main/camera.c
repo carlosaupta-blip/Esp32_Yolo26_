@@ -54,14 +54,14 @@ esp_err_t camera_init(void) {
         .pin_pclk      = CAM_PIN_PCLK,
 
         // Reloj del sensor
-        .xclk_freq_hz  = 20000000,          // 20 MHz recomendado para OV2640
+        .xclk_freq_hz  = 10000000,          // 20 MHz recomendado para OV2640
         .ledc_timer    = LEDC_TIMER_0,
         .ledc_channel  = LEDC_CHANNEL_0,
 
         // Formato y resolución inicial
         .pixel_format  = PIXFORMAT_JPEG,    // JPEG comprimido por hardware
-        .frame_size    = FRAMESIZE_QVGA,    // 320x240 por defecto (buena relación fluidez/calidad)
-        .jpeg_quality  = 13,                // Calidad media-alta (0=mejor, 63=menor)
+        .frame_size    = FRAMESIZE_VGA,    // 640x480 por defecto (buena relación fluidez/calidad)
+        .jpeg_quality  = 8,                // Calidad media-alta (0=mejor, 63=menor)
 
         // Buffers de frame: 2 activan modo continuo por hardware (mayor FPS)
         .fb_count      = 2,
@@ -107,10 +107,10 @@ esp_err_t camera_init(void) {
         if (config_store_get_cam("denoise", &val) == ESP_OK) s->set_denoise(s, val);
 
         // La resolución (framesize) se aplica al final, ya que puede reiniciar internamente
-        if (config_store_get_cam("framesize", &val) == ESP_OK) {
+        /*if (config_store_get_cam("framesize", &val) == ESP_OK) {
             s->set_framesize(s, (framesize_t)val);
             ESP_LOGI(TAG, "Resolución aplicada: %d", val);
-        }
+        }*/
     } else {
         ESP_LOGW(TAG, "No se pudo obtener sensor_t para aplicar ajustes");
     }

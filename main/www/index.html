@@ -11,6 +11,8 @@
 <body>
   <!-- Imagen de cámara -->
   <img id="cam-view" src="" alt="Camera Stream" style="display:none">
+  <!-- Canvas superpuesto para bounding boxes -->
+  <canvas id="overlay-canvas"></canvas>
   <div id="no-signal"><span>📷</span>Sin señal — pulsa Iniciar</div>
 
   <!-- HUD de métricas (NO aparece en fotos descargadas) -->
@@ -68,10 +70,10 @@
         <option value="0">160x120 (QQVGA)</option>
         <option value="1">176x144 (QCIF)</option>
         <option value="2">240x176 (HQVGA)</option>
-        <option value="3" selected>320x240 (QVGA)</option>
+        <option value="3">320x240 (QVGA)</option>
         <option value="4">400x296 (CIF)</option>
         <option value="5">480x320 (HVGA)</option>
-        <option value="6">640x480 (VGA)</option>
+        <option value="6" selected>640x480 (VGA)</option>
         <option value="7">800x600 (SVGA)</option>
         <option value="8">1024x768 (XGA)</option>
         <option value="9">1280x720 (HD)</option>

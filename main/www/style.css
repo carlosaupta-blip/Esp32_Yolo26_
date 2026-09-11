@@ -53,6 +53,18 @@ body {
   image-rendering: pixelated;
 }
 
+/* Canvas overlay para bounding boxes */
+#overlay-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none; /* los clics pasan a la imagen o botones */
+  z-index: 10;
+  image-rendering: pixelated;
+}
+
 #no-signal {
   position: absolute;
   top: 50%;
