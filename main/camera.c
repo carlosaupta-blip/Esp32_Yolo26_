@@ -53,8 +53,17 @@ esp_err_t camera_init(void) {
         .pin_href      = CAM_PIN_HREF,
         .pin_pclk      = CAM_PIN_PCLK,
 
-        // Reloj del sensor
-        .xclk_freq_hz  = 10000000,          // 20 MHz recomendado para OV2640
+        // Reloj del sensor (XCLK).
+        // 20 MHz es el valor del ejemplo de referencia del propio driver para
+        // PIXFORMAT_JPEG (esp32-camera/driver/include/esp_camera.h:35) y el tope
+        // que el temporizador de reloj del OV2640 acota sin perdida. A 10 MHz el
+        // sensorISP y su codificador JPEG corren a la mitad: peor compresion y
+        // menos fps de captura.
+        // El divisor de reloj del LCD_CAM es 160 MHz / xclk, o sea 8 a 20 MHz y
+        // 16 a 10 MHz; ambos son enteros validos, no hay problema de division.
+        // Si tras el cambio aparecen "Fallo al capturar frame" o JPEG corruptos,
+        // ese clon de OV2640 no sostiene 20 MHz: volver a 10000000.
+        .xclk_freq_hz  = 20000000,
         .ledc_timer    = LEDC_TIMER_0,
         .ledc_channel  = LEDC_CHANNEL_0,
 

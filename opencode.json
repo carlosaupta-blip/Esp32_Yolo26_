@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "servers": {
+      "NotebookLM_MCP": {
+        "type": "local",
+        "command": ["npx", "-y", "notebooklm-mcp@latest"],
+        "timeout": {
+          "startup": 120000,
+          "execution": 600000
+        }
+      }
+    }
+  }
+}

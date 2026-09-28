@@ -1,5 +1,15 @@
 # Name,   Type, SubType, Offset,   Size,    Flags
+# app0 paso de 5 MiB a 12.5 MiB porque el .espdl de YOLO26n (PTQ+TQT+LUT INT16)
+# ocupa 9.31 MiB. La tabla completa sigue cerrando en los 16 MiB del modulo:
+#   0x20000 + 0xC80000 = 0xCA0000   (fin de app0)
+#   0xCA0000 + 0x360000 = 0x1000000  (16 MiB exactos)
+# nvs, otadata y el offset de la tabla (0x8000) no se tocan.
+# spiffs conserva 3.375 MiB; www/ mide 372 KB, de modo que sigue con holgura.
+#
+# IMPORTANTE: al cambiar el layout hay que borrar el flash completo antes de
+# flashear, porque CONFIG_PARTITION_TABLE_MD5=y y el MD5 de la tabla cambia:
+#   idf.py fullclean && idf.py erase-flash && idf.py flash monitor
 nvs,      data, nvs,     0x9000,   0x6000,
-otadata,  data, ota,     0xf000,   0x2000,
-app0,     app,  ota_0,   0x20000,  0x500000,
-spiffs,   data, spiffs,  0x520000, 0xAE0000,
+otadata,  data, ota,     0xF000,   0x2000,
+app0,     app,  ota_0,   0x20000,  0xC80000,
+spiffs,   data, spiffs,  0xCA0000, 0x360000,

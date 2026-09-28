@@ -1,9 +1,12 @@
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
 #include "esp_spiffs.h"
 #include "config_store.h"
@@ -34,9 +37,6 @@ static SemaphoreHandle_t detections_mutex = NULL;
  * Manejador HTTP para /api/detections
  * ------------------------------------------------------------------- */
 static esp_err_t detections_get_handler(httpd_req_t *req) {
-    cJSON *root = cJSON_CreateObject();
-    cJSON *dets_array = cJSON_AddArrayToObject(root, "detections");
-
     bool has = false;
     yolo_detection_t det = {0};
     int orig_w = 640, orig_h = 480;
@@ -51,35 +51,49 @@ static esp_err_t detections_get_handler(httpd_req_t *req) {
         xSemaphoreGive(detections_mutex);
     }
 
-    if (orig_w == 0) orig_w = 640;
-    if (orig_h == 0) orig_h = 480;
+    if (orig_w <= 0) orig_w = 640;
+    if (orig_h <= 0) orig_h = 480;
 
+    // El JSON se arma a mano en un buffer de PILA.
+    //
+    // Antes se construia un arbol cJSON (CreateObject + AddArrayToObject +
+    // 6 AddNumberToObject + AddItemToArray, o sea ~9 mallocs) y se serializaba
+    // con cJSON_PrintUnformatted(), que reserva un buffer de heap que empieza
+    // en 256 B y se duplica en cada ensure(). Eso reventaba de forma
+    // intermitente con LoadProhibited dentro de print_object al recursar por
+    // el arbol (cJSON.c:1850), desde la tarea de httpd, mientras la tarea de
+    // YOLO tiene ~900 KB de RGB en PSRAM, 2.79 MB de modelo residente y el TX
+    // de WiFi encima. Tres requests identicosminsterio antes Habian funcionado
+    // bien, asi que no es un dato malo: es la pila de mallocs del heap la que
+    // se queda corta en el peor momento.
+    //
+    // Aqui el payload son 6 numeros de formato FIJO: no hay nada que reservar
+    // y la respuesta se vuelve imposible de corromper por falta de memoria.
+    char body[256];
+    int n;
     if (has) {
-        cJSON *item = cJSON_CreateObject();
-        cJSON_AddNumberToObject(item, "x", det.x);
-        cJSON_AddNumberToObject(item, "y", det.y);
-        cJSON_AddNumberToObject(item, "w", det.w);
-        cJSON_AddNumberToObject(item, "h", det.h);
-        cJSON_AddNumberToObject(item, "score", det.score);
-        cJSON_AddNumberToObject(item, "class_id", det.class_id);
-        cJSON_AddItemToArray(dets_array, item);
+        n = snprintf(body, sizeof(body),
+                     "{\"detections\":[{\"x\":%.1f,\"y\":%.1f,\"w\":%.1f,\"h\":%.1f,"
+                     "\"score\":%.4f,\"class_id\":%d}],"
+                     "\"orig_width\":%d,\"orig_height\":%d}",
+                     (double)det.x, (double)det.y, (double)det.w, (double)det.h,
+                     (double)det.score, det.class_id, orig_w, orig_h);
+    } else {
+        n = snprintf(body, sizeof(body),
+                     "{\"detections\":[],\"orig_width\":%d,\"orig_height\":%d}",
+                     orig_w, orig_h);
     }
 
-    cJSON_AddNumberToObject(root, "orig_width", orig_w);
-    cJSON_AddNumberToObject(root, "orig_height", orig_h);
-
-    char *json_str = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    if (!json_str) {
+    if (n < 0 || (size_t)n >= sizeof(body)) {
+        ESP_LOGE(TAG, "JSON de detecciones truncado (%d bytes)", n);
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "📤 Enviando JSON: %s", json_str);
+    ESP_LOGD(TAG, "Enviando detecciones: %s", body);
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json_str, strlen(json_str));
-    free(json_str);
+    httpd_resp_send(req, body, (size_t)n);
     return ESP_OK;
 }
 
@@ -124,16 +138,45 @@ static void yolo_inference_task(void *arg) {
         if (xQueueReceive(yolo_frame_queue, &frame, 0) == pdTRUE) {
             if (frame.buf && frame.len > 0) {
                 // Decodificar JPEG a RGB888
+                int64_t t_mark = esp_timer_get_time();
                 bool ok = fmt2rgb888(frame.buf, frame.len, PIXFORMAT_JPEG, rgb_buffer);
                 free(frame.buf); // Liberar el buffer del frame
+                const int64_t t_jpeg_us = esp_timer_get_time() - t_mark;
 
                 if (ok) {
                     // Preparar entrada y ejecutar inferencia
+                    t_mark = esp_timer_get_time();
                     yolo_prepare_input(rgb_buffer, frame.width, frame.height);
+                    const int64_t t_pre_us = esp_timer_get_time() - t_mark;
+
+                    t_mark = esp_timer_get_time();
                     yolo_run_inference();
+                    const int64_t t_inf_us = esp_timer_get_time() - t_mark;
 
                     // Obtener detecciones (usando la nueva función mejorada)
+                    t_mark = esp_timer_get_time();
                     int n = yolo_get_detections(detections, max_detections, yolo_threshold);
+                    const int64_t t_post_us = esp_timer_get_time() - t_mark;
+
+                    // Desglose por etapa. El benchmark oficial de ESP-DL para
+                    // yolo26n_512_s8_s3 da Pre 34 ms | Inf 7822 ms | Post 23 ms,
+                    // medidos con esp_timer alrededor de cada llamada y SIN el
+                    // decode JPEG, asi que la comparacion es directa. "JPEG" es
+                    // el extra que el ejemplo oficial no mide: decode software a
+                    // RGB888 a 640x480.
+                    // Ojo con la escala: son ~7.8 s de inferencia, no 7.8 ms. Si
+                    // esperabas paridad con los 20 fps del stream (33 ms), el
+                    // cuello de botella es model->run() y ningun ajuste de DMA ni
+                    // de RTOS lo acerca; la unica palanca real es la resolucion
+                    // de entrada, que escala con el cuadrado de los pixeles.
+                    const int64_t t_total_us = t_jpeg_us + t_pre_us + t_inf_us + t_post_us;
+                    ESP_LOGI(TAG,
+                             "Tiempos | JPEG: %" PRId64 " ms | Pre: %" PRId64 " ms | "
+                             "Inf: %" PRId64 " ms | Post: %" PRId64 " ms | Total: %" PRId64 " ms "
+                             "-> %.3f FPS",
+                             t_jpeg_us / 1000, t_pre_us / 1000, t_inf_us / 1000,
+                             t_post_us / 1000, t_total_us / 1000,
+                             (t_total_us > 0) ? (1000000.0 / (double)t_total_us) : 0.0);
 
                     int src_w, src_h;
                     yolo_get_current_resolution(&src_w, &src_h);
@@ -194,6 +237,27 @@ static void heartbeat_task(void *arg) {
  * ------------------------------------------------------------------- */
 void app_main(void) {
     ESP_LOGW(TAG, "-> app_main");
+
+    // Motivo del reinicio anterior, impreso lo primero de todo. Es la unica
+    // forma de saber si un brownout ocurrio ANTES de app_main (durante el init
+    // de PSRAM, en el que no hay forma de actuar) o DESPUES (en cuyo caso la
+    // ultima linea del log antes del corte dice exactamente en que etapa).
+    switch (esp_reset_reason()) {
+        case ESP_RST_BROWNOUT:
+            ESP_LOGE(TAG, "Reinicio anterior: BROWNOUT (caida de alimentacion). "
+                          "En ESP32-S3 el detector ya esta en el nivel 7 = 2.44 V, "
+                          "el mas permisivo de los 8; no hay ajuste de firmware. "
+                          "Revisar fuente, cable USB y condensador de bulk.");
+            break;
+        case ESP_RST_POWERON:    ESP_LOGW(TAG, "Reinicio anterior: encendido"); break;
+        case ESP_RST_TASK_WDT: ESP_LOGE(TAG, "Reinicio anterior: WDT de tarea"); break;
+        case ESP_RST_INT_WDT:  ESP_LOGE(TAG, "Reinicio anterior: WDT de interrupcion"); break;
+        case ESP_RST_WDT:      ESP_LOGE(TAG, "Reinicio anterior: otro WDT"); break;
+        case ESP_RST_PANIC:    ESP_LOGE(TAG, "Reinicio anterior: panic"); break;
+        case ESP_RST_SW:       ESP_LOGW(TAG, "Reinicio anterior: software"); break;
+        default:               ESP_LOGW(TAG, "Reinicio anterior: otro (0x%x)", esp_reset_reason()); break;
+    }
+
     ESP_ERROR_CHECK(config_store_init());
 
     // Montar SPIFFS para almacenamiento de configuración

@@ -49,10 +49,16 @@ static esp_err_t send_file(httpd_req_t *req, const char *path, const char *mime_
 }
 
 static esp_err_t threshold_post_handler(httpd_req_t *req) {
-    char buf[1];
+    // BUG ARREGLADO: el buffer era char buf[5] y la guarda era
+    // `if (remaining >= sizeof(buf))` -> HTTP 400. Eso rechazaba SIEMPRE: el
+    // slider de index.html manda {"threshold":0.25}, o sea 16 bytes, asi que
+    // yolo_threshold NUNCA llego a cambiarse desde la UI. El endpoint estaba
+    // registrado y el control existir, pero era inalcanzable. 64 B sobran de
+    // sobra para el cuerpo mas largo que genera el slider.
+    char buf[64];
     int ret, remaining = req->content_len;
 
-    if (remaining >= sizeof(buf)) {
+    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Contenido JSON demasiado largo");
         return ESP_FAIL;
     }
@@ -68,9 +74,18 @@ static esp_err_t threshold_post_handler(httpd_req_t *req) {
     if (root) {
         cJSON *thresh_json = cJSON_GetObjectItem(root, "threshold");
         if (thresh_json && cJSON_IsNumber(thresh_json)) {
-            // Actualizar de forma atómica la variable global utilizada en el post-procesamiento [cite: 422]
-            yolo_threshold = (float)thresh_json->valuedouble;
-            ESP_LOGI(TAG, "🟢 Umbral de confianza YOLO actualizado dinámicamente a: %.3f", yolo_threshold);
+            float value = (float)thresh_json->valuedouble;
+            // Validar rango: el preprocesador de ESP-DL descarta por debajo de
+            // 0.01 con un pre-filtrado entero, y por encima de 1.0 no hay
+            // nada que detectar. Rechazar fuera de rango en vez de quemarlo
+            // evita dejar el detector inservible por una currada en la UI.
+            if (value >= 0.01f && value <= 1.0f) {
+                // Actualizar de forma atómica la variable global utilizada en el post-procesamiento [cite: 422]
+                yolo_threshold = value;
+                ESP_LOGI(TAG, "🟢 Umbral de confianza YOLO actualizado dinámicamente a: %.3f", yolo_threshold);
+            } else {
+                ESP_LOGW(TAG, "Umbral %.3f fuera de rango [0.01, 1.0]; se ignora", value);
+            }
         }
         cJSON_Delete(root);
     }
@@ -164,12 +179,23 @@ static esp_err_t capture_get_handler(httpd_req_t *req) {
  * ------------------------------------------------------------------- */
 static esp_err_t metrics_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
     metrics_get_json(root);
     char *str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    // cJSON_PrintUnformatted devuelve NULL si el buffer de heap no crece.
+    // Sin este chequeo, httpd_resp_sendstr() haria strlen(NULL): mismo tipo de
+    // LoadProhibited que tumbaba /api/detections.
+    if (!str) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, str);
     cJSON_free(str);
-    cJSON_Delete(root);
     return ESP_OK;
 }
 

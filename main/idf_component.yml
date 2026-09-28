@@ -18,4 +18,9 @@ dependencies:
   espressif/led_strip: ^3.0.3
   espressif/cjson: ^1.7.19~2
   espressif/esp_websocket_client: ^1.8.0
-  espressif/esp-dl: ^3.3.8
+  # El .espdl de YOLO26n generado con PTQ+TQT+LUT INT16 exige ESP-DL >= 3.3.11.
+  # Antes estaba en ^3.3.8, que resolvia a 3.3.10 y no reconoce este formato.
+  espressif/esp-dl: ^3.3.12
+  # Procesador oficial de YOLO26: letterbox con ImagePreprocessor + decode_grid
+  # NMS-free (top-K) sobre las seis salidas one2one_p{3,4,5}_{box,cls}.
+  espressif/yolo26: ^0.1.0

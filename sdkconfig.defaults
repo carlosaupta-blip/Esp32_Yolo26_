@@ -1,0 +1,56 @@
+# Valores por defecto que ESP-IDF aplica al GENERAR el sdkconfig.
+# El sdkconfig esta en .gitignore, asi que este archivo es lo que mantiene la
+# configuracion de compilacion tras un `fullclean` o un `rm sdkconfig`.
+#
+# --- Compilacion para inferencia YOLO26n ---------------------------------
+# El benchmark oficial de ESP-DL da 7822 ms de inferencia para yolo26n@512 en
+# ESP32-S3 YA compilado en release (esp-dl/models/yolo26/README.md). Ese
+# numero depende de CONFIG_COMPILER_OPTIMIZATION_PERF; con la opcion DEBUG
+# (-Og, sin optimizacion) la latencia sube varias veces. Por eso se fija PERF
+# aqui y no se deja el default DEBUG de un proyecto recien generado.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTION_LEVEL=2
+
+# --- Tamano de cache del ESP32-S3 ----------------------------------------
+# El ejemplo oficial de ESP-DL para YOLO26 en ESP32-S3
+# (esp-dl/examples/yolo26_detect/sdkconfig.defaults.esp32s3) usa 32 KB de
+# instruction cache y 64 KB de data cache. YOLO26n@512 ejecuta ~300 operadores
+# y lee tensores de pesos grandes de forma casi secuencial: con 32 KB de data
+# cache un tensor de 64 KB no cabe y falla de forma continua.
+#
+# COSTE REAL (no es solo rendimiento): los caches se reservan al principio de
+# SRAM0, de modo que subir el I-cache a 32 KB quita 16 KB de IRAM y subir el
+# D-cache a 64 KB quita 32 KB de DRAM. Son 48 KB menos de RAM interna para el
+# heap, los stacks de FreeRTOS y los buffers de WiFi/HTTP/DMA.
+# Referencia: components/heap/port/esp32s3/memory_layout.c del ESP-IDF, donde
+# con INSTRUCTION_CACHE_16KB se reserva 0x40374000/0x4000 como IRAM, y con
+# DATA_CACHE_16KB/32KB se reservan 0x3FCF0000/0x8000 y 0x3C000000/0x4000 como
+# DRAM. Con 32/64 KB ninguna de esas regiones existe.
+#
+# Si el build falla con "region 'iram0_0_seg' overflowed" o
+# "region 'dram0_0_seg' overflowed", hay que revertir estos cuatro valores.
+#
+# CONFIG_ESP32S3_DATA_CACHE_LINE_64B queda sin tocar (32 B). El ejemplo oficial
+# usa 64 B, que rinde algo mas con el streaming de pesos pero castiga los
+# accesos dispersos de WiFi/HTTP, que aqui corren en paralelo al modelo.
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_SIZE=0x8000
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_SIZE=0x10000
+
+# --- Memoria / flash ------------------------------------------------------
+# El .espdl de YOLO26n cuantizado ocupa 9.31 MiB, por lo que app0 necesita
+# 12.5 MiB (ver partitions.csv). Aqui solo se fija el tamano de flash; el
+# layout de particiones vive en partitions.csv.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# La cuantizacion INT16 + LUT del modelo de ESP-DL y el fbs_loader asientan
+# buffers grandes en PSRAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y

@@ -10,7 +10,7 @@ dependencies:
       type: service
     version: 1.7.19~2
   espressif/dl_fft:
-    component_hash: a955ca29581de2177ddf25759273bd83f082b3c805e735fe6ee105858643989b
+    component_hash: 3e8f7d34e04bfa6333f289a6d126745bebe0cee9311b81a6a5d106047f63ef65
     dependencies:
     - name: idf
       require: private
@@ -18,9 +18,9 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 0.6.0
+    version: 0.7.0
   espressif/esp-dl:
-    component_hash: f67408f364f2faa1178a5f0eb2f0fcdf504b68902fa4f3bcd6fa9f797e1ed623
+    component_hash: d792e72ab3858d805d8918d1215a862541344625f62134597866834de666fd04
     dependencies:
     - name: espressif/dl_fft
       registry_url: https://components.espressif.com
@@ -46,7 +46,7 @@ dependencies:
     - esp32s2
     - esp32s3
     - esp32s31
-    version: 3.3.10
+    version: 3.3.12
   espressif/esp32-camera:
     component_hash: bc9c8a6b51df777a014fa295825b3de5069bc0300c317acff20c97cf4a10ac7d
     dependencies:
@@ -110,6 +110,17 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 3.0.3
+  espressif/yolo26:
+    component_hash: 4b7682b4b94e4886ddf9c7cd97706a9715d468667b69d9adb290fbfac0d5e0ee
+    dependencies:
+    - name: espressif/esp-dl
+      registry_url: https://components.espressif.com
+      require: private
+      version: ~3.3.0
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.1.0
   idf:
     source:
       type: idf
@@ -120,7 +131,8 @@ direct_dependencies:
 - espressif/esp32-camera
 - espressif/esp_websocket_client
 - espressif/led_strip
+- espressif/yolo26
 - idf
-manifest_hash: caa1612dd964ac6e50720b1fbba78f84bbcc7a972a089183ed7c8bd2e8b12adc
+manifest_hash: f25889c66a52eedecd0d18671f53eb93ede8a0159c8bd32d6cf4ede2da320444
 target: esp32s3
 version: 3.0.0

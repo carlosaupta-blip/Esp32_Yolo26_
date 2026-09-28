@@ -79,3 +79,6 @@ Desktop.ini
 *.sln.docstates # Visual Studio
 build/
 /esp-dl
+yolo26n_320_s8_s3_package/yolo26n_512_s8_s3.espdl
+yolo26n_320_s8_s3_package/yolo26n_512_s8_s3.info
+yolo26n_320_s8_s3_package/yolo26n_512_s8_s3.json
