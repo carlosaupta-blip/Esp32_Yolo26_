@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>   // qsort: ordena las detecciones por score (ver compare_detections)
 #include <string.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
@@ -27,8 +28,21 @@ static const char *TAG = "main";
 QueueHandle_t yolo_frame_queue = NULL;
 float yolo_threshold = 0.1f;
 
-static yolo_detection_t best_detection = {0};
-static bool has_detection = false;
+/* Numero maximo de detecciones que se conservan y se publican.
+ *
+ * Antes esto era un unico `yolo_detection_t best_detection` mas un bool
+ * `has_detection`: la tarea de inferencia recorria las N detecciones que
+ * devolvia YOLO26, se quedaba con la de mayor score y tiraba el resto. El
+ * post-proceso de ESP-DL es NMS-free y su top-K (kTargetK = 32 en
+ * yolo_bridge.cpp) ya decide que es una deteccion real y cual no, asi que
+ * descartar las demas era una limitacion del firmware y no del modelo.
+ *
+ * 10 es el tope practico: el puente entrega hasta max_results y cada
+ * deteccion ocupa ~77 bytes en el JSON (ver detections_get_handler). */
+#define MAX_DETECTIONS 10
+static yolo_detection_t s_detections[MAX_DETECTIONS];
+static int s_detection_count = 0;
+
 static int last_orig_w = 640;
 static int last_orig_h = 480;
 static SemaphoreHandle_t detections_mutex = NULL;
@@ -37,15 +51,18 @@ static SemaphoreHandle_t detections_mutex = NULL;
  * Manejador HTTP para /api/detections
  * ------------------------------------------------------------------- */
 static esp_err_t detections_get_handler(httpd_req_t *req) {
-    bool has = false;
-    yolo_detection_t det = {0};
+    /* Copia local bajo el mutex: formatear el JSON leyendo los globales sin
+     * mutex permitiria que la tarea de YOLO los reescribiera a mitad de la
+     * respuesta, y el array contendria detecciones de dos inferencias
+     * distintas mezcladas. */
+    yolo_detection_t dets[MAX_DETECTIONS];
+    int count = 0;
     int orig_w = 640, orig_h = 480;
 
     if (xSemaphoreTake(detections_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        has = has_detection;
-        if (has) {
-            det = best_detection;
-        }
+        count = s_detection_count;
+        if (count > MAX_DETECTIONS) count = MAX_DETECTIONS;
+        memcpy(dets, s_detections, (size_t)count * sizeof(yolo_detection_t));
         orig_w = last_orig_w;
         orig_h = last_orig_h;
         xSemaphoreGive(detections_mutex);
@@ -54,47 +71,87 @@ static esp_err_t detections_get_handler(httpd_req_t *req) {
     if (orig_w <= 0) orig_w = 640;
     if (orig_h <= 0) orig_h = 480;
 
-    // El JSON se arma a mano en un buffer de PILA.
+    // El JSON se arma a mano en un buffer de PILA, sin cJSON.
     //
-    // Antes se construia un arbol cJSON (CreateObject + AddArrayToObject +
-    // 6 AddNumberToObject + AddItemToArray, o sea ~9 mallocs) y se serializaba
-    // con cJSON_PrintUnformatted(), que reserva un buffer de heap que empieza
-    // en 256 B y se duplica en cada ensure(). Eso reventaba de forma
-    // intermitente con LoadProhibited dentro de print_object al recursar por
-    // el arbol (cJSON.c:1850), desde la tarea de httpd, mientras la tarea de
-    // YOLO tiene ~900 KB de RGB en PSRAM, 2.79 MB de modelo residente y el TX
-    // de WiFi encima. Tres requests identicosminsterio antes Habian funcionado
-    // bien, asi que no es un dato malo: es la pila de mallocs del heap la que
-    // se queda corta en el peor momento.
+    // Antes se construia un arbol cJSON (~9 mallocs por request) y se
+    // serializaba con cJSON_PrintUnformatted(), que reserva un buffer de heap
+    // que empieza en 256 B y se duplica en cada ensure(). Eso reventaba de
+    // forma intermitente con LoadProhibited dentro de print_object al recursar
+    // por el arbol (cJSON.c:1850), desde la tarea de httpd, mientras la tarea
+    // de YOLO tiene ~900 KB de RGB en PSRAM, 2.79 MB de modelo residente y el
+    // TX de WiFi encima. Tres requests identicos tres milisegundos antes habian
+    // funcionado bien, asi que no era un dato malo: era la pila de mallocs la
+    // que se quedaba corta en el peor momento.
     //
-    // Aqui el payload son 6 numeros de formato FIJO: no hay nada que reservar
-    // y la respuesta se vuelve imposible de corromper por falta de memoria.
-    char body[256];
+    // El array se llena deteccion a deteccion comprobando que CADA entrada
+    // cabra COMPLETA antes de copiarla. Asi el JSON nunca queda partido por la
+    // mitad: si no cabe la siguiente, se cierra el array limpio y se avisa con
+    // un log. Recortar a lo bruto produciria JSON invalido y la UI dejaria de
+    // dibujar del todo.
+    char body[1400];
+    size_t used;
+    int written = 0;
     int n;
-    if (has) {
-        n = snprintf(body, sizeof(body),
-                     "{\"detections\":[{\"x\":%.1f,\"y\":%.1f,\"w\":%.1f,\"h\":%.1f,"
-                     "\"score\":%.4f,\"class_id\":%d}],"
-                     "\"orig_width\":%d,\"orig_height\":%d}",
-                     (double)det.x, (double)det.y, (double)det.w, (double)det.h,
-                     (double)det.score, det.class_id, orig_w, orig_h);
-    } else {
-        n = snprintf(body, sizeof(body),
-                     "{\"detections\":[],\"orig_width\":%d,\"orig_height\":%d}",
-                     orig_w, orig_h);
-    }
 
+    n = snprintf(body, sizeof(body), "{\"detections\":[");
     if (n < 0 || (size_t)n >= sizeof(body)) {
-        ESP_LOGE(TAG, "JSON de detecciones truncado (%d bytes)", n);
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
+    used = (size_t)n;
 
-    ESP_LOGD(TAG, "Enviando detecciones: %s", body);
+    for (int i = 0; i < count; i++) {
+        char entry[128];
+        int len = snprintf(entry, sizeof(entry),
+                           "%s{\"x\":%.1f,\"y\":%.1f,\"w\":%.1f,\"h\":%.1f,"
+                           "\"score\":%.4f,\"class_id\":%d}",
+                           (i == 0) ? "" : ",",
+                           (double)dets[i].x, (double)dets[i].y,
+                           (double)dets[i].w, (double)dets[i].h,
+                           (double)dets[i].score, dets[i].class_id);
+        if (len < 0) break;
+        // +64 reserva el cierre '],"orig_width":N,"orig_height":N}'
+        if (used + (size_t)len + 64 >= sizeof(body)) break;
+        memcpy(body + used, entry, (size_t)len);
+        used += (size_t)len;
+        written++;
+    }
+
+    n = snprintf(body + used, sizeof(body) - used,
+                 "],\"orig_width\":%d,\"orig_height\":%d}", orig_w, orig_h);
+    if (n < 0 || (size_t)n >= sizeof(body) - used) {
+        ESP_LOGE(TAG, "No se pudo cerrar el JSON de detecciones");
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    used += (size_t)n;
+
+    if (written < count) {
+        ESP_LOGW(TAG, "Solo se publicaron %d de %d detecciones: no caben en %u bytes",
+                 written, count, (unsigned)sizeof(body));
+    }
+    ESP_LOGD(TAG, "Publicando %d/%d detecciones", written, count);
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, body, (size_t)n);
+    httpd_resp_send(req, body, used);
     return ESP_OK;
+}
+
+/* Ordena por score descendente.
+ *
+ * NO se puede confiar en que yolo_get_detections() devuelva el array ordenado:
+ * YOLO26::postprocess() (managed_components/espressif__yolo26/yolo26.cpp:153)
+ * usa std::nth_element con greater_box, que es una PARTICION parcial: deja los
+ * target_k mejores al principio pero sin Guarantee de orden entre ellos. Asi
+ * que detections[0] no es necesariamente la de mayor confianza. Ordenar aqui
+ * (10 elementos, coste irrelevante) deja el contrato claro para la UI, que
+ * dibuja en orden y quiere ver la mas fuerte encima. */
+static int compare_detections(const void *a, const void *b) {
+    const yolo_detection_t *da = (const yolo_detection_t *)a;
+    const yolo_detection_t *db = (const yolo_detection_t *)b;
+    if (da->score > db->score) return -1;
+    if (da->score < db->score) return 1;
+    return 0;
 }
 
 /* ----------------------------------------------------------------------
@@ -120,7 +177,7 @@ static void yolo_inference_task(void *arg) {
         return;
     }
 
-    const int max_detections = 10;
+    const int max_detections = MAX_DETECTIONS;
     yolo_detection_t detections[max_detections];
     yolo_frame_t frame;
 
@@ -185,24 +242,36 @@ static void yolo_inference_task(void *arg) {
                         last_orig_w = src_w;
                         last_orig_h = src_h;
 
-                        if (n > 0) {
-                            // Elegir la de mayor confianza
-                            int best_idx = 0;
-                            for (int i = 1; i < n; i++) {
-                                if (detections[i].score > detections[best_idx].score) {
-                                    best_idx = i;
-                                }
+                        // Se publican TODAS las detecciones que superaron
+                        // yolo_threshold, no solo la mejor. yolo_get_detections()
+                        // ya devuelve unicamente las que YOLO26 deemio reales
+                        // (decode_grid con su pre-filtrado entero de confianza y
+                        // su top-K NMS-free), asi que el unico filtro que queda
+                        // es el umbral que controla el usuario. Antes se
+                        // descartaban todas menos la de mayor score.
+                        int keep = (n > max_detections) ? max_detections : n;
+                        if (keep > 1) {
+                            qsort(detections, (size_t)keep, sizeof(yolo_detection_t),
+                                  compare_detections);
+                        }
+                        memcpy(s_detections, detections, (size_t)keep * sizeof(yolo_detection_t));
+                        s_detection_count = keep;
+
+                        if (keep > 0) {
+                            ESP_LOGI(TAG, "✅ Inferencia OK [%dx%d] -> %d deteccion(es) "
+                                          "sobre umbral %.2f (mejor: %.2f%%)",
+                                     src_w, src_h, keep, yolo_threshold,
+                                     detections[0].score * 100.0f);
+                            for (int i = 0; i < keep; i++) {
+                                ESP_LOGI(TAG, "   [%d] clase=%d score=%.3f "
+                                              "[x:%.1f, y:%.1f, w:%.1f, h:%.1f]",
+                                              i, detections[i].class_id,
+                                              detections[i].score,
+                                              detections[i].x, detections[i].y,
+                                              detections[i].w, detections[i].h);
                             }
-                            best_detection = detections[best_idx];
-                            has_detection = true;
-                            ESP_LOGI(TAG, "✅ Inferencia OK [%dx%d] -> Mejor Detección: Confianza %.2f%% | [x:%.1f, y:%.1f, w:%.1f, h:%.1f]",
-                                     src_w, src_h,
-                                     best_detection.score * 100.0f,
-                                     best_detection.x, best_detection.y,
-                                     best_detection.w, best_detection.h);
                         } else {
-                            has_detection = false;
-                            ESP_LOGD(TAG, "❌ Sin detecciones en este frame");
+                            ESP_LOGD(TAG, "❌ Sin detecciones sobre umbral %.2f", yolo_threshold);
                         }
                         xSemaphoreGive(detections_mutex);
                     }
