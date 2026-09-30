@@ -34,6 +34,7 @@ function initCameraPage() {
       btnStream.textContent = '⏸ Detener';
       streamActive = true;
       setTimeout(resizeCanvas, 200);
+      startDetections();
     } else {
       camView.src = '';
       camView.style.display = 'none';
@@ -41,7 +42,7 @@ function initCameraPage() {
       noSignal.innerHTML = '<span>📷</span>Stream detenido';
       btnStream.textContent = '▶ Iniciar';
       streamActive = false;
-      ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+      stopDetections();
     }
   });
 
@@ -165,104 +166,228 @@ camView.addEventListener('load', () => {
   resizeCanvas();
 });
 
-// 2. Polling de detecciones con compensación de relación de aspecto (Letterbox/Pillarbox)
-async function fetchAndDrawDetections() {
-  if (!streamActive) {
-    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-    return;
+// ============================================================================
+// 2. Detecciones de POSE: esqueleto de keypoints
+// ============================================================================
+//
+// El ESP32 devuelve, por cada deteccion, la caja Y los 6 keypoints de la mano
+// como [x, y, visibilidad]. Aqui se dibuja el esqueleto, no una caja.
+//
+// 6 KEYPOINTS DE MANO: muneca + punta de cada dedo.
+// El conteo sale del modelo: kpt_shape = (6, 3) -> nk = 18 canales por nivel.
+// No son los 21 landmarks de MediaPipe ni los 17 de cuerpo de COCO.
+//
+//   0 muneca          3 punta_medio
+//   1 punta_pulgar    4 punta_anular
+//   2 punta_indice    5 punta_menique
+//
+// ESTE ORDEN TIENE QUE COINCIDIR con el del .txt del dataset. Si tu
+// anotacion lista los puntos en otro orden, el abanico se dibuja cruzado:
+// se reconoce enseguida porque las lineas se salen de la mano. Se arregla
+// cambiando SKELETON y KPT_COLORS aqui, y KPT_NAMES/KPT_SKELETON en la
+// celda 2 del cuaderno. El numero de puntos NO hay que tocarlo: la celda 5
+// lo lee del modelo.
+//
+// DIBUJAR UN ESQUELETO ES MAS EXIGENTE QUE DIBUJAR UNA CAJA:
+//
+//   - Una caja es convexa: cualquier par de puntos cae dentro y el rectangulo
+//     siempre se ve bien. Un esqueleto NO: un keypoint mal decodificado se
+//     traduce en una linea que atraviesa la mano o sale de la imagen.
+//   - Por eso NO se dibuja un segmento si alguno de sus dos extremos esta por
+//     debajo del umbral de visibilidad. Un keypoint no visto puede estar en
+//     cualquier sitio, y "unirlo" produce el efecto de antena que delata que
+//     el modelo no vio nada. Mejor que se note el hueco.
+const KPT_VIS_TH = 0.5;   // debe coincidir con KPT_VIS_TH del cuaderno
+const NUM_KPT = 6;
+
+// El esqueleto es un abanico: la muneca es el centro y de ella cuelgan las cinco
+// puntas. Coincide con KPT_SKELETON de la celda 2 del cuaderno.
+const SKELETON = [
+  [0, 1], [0, 2], [0, 3], [0, 4], [0, 5],
+];
+
+// Un color por punto: la muneca en cian, y cada dedo en un tono distinto para
+// que se distinguan sin tener que leer la etiqueta. Coincide con KPT_COLORS
+// de la celda 2.
+const KPT_COLORS = [
+  '#00e5ff',
+  '#ffd400', '#ff8c00', '#00ff88', '#c56bff', '#8f5bff',
+];
+
+const KPT_NAMES = [
+  'muneca',
+  'pulgar', 'indice', 'medio', 'anular', 'menique',
+];
+
+// Intervalo de sondeo de /api/detections.
+//
+// SUBIDO de 500 a 3800 ms para igualarlo al periodo de inferencia medido
+// (Inf 3.4 s + Pre + JPEG = ~3.7 s). Con 500 ms la UI preguntaba 7 veces por
+// cada inferencia y recibia 7 veces el MISMO resultado: 6 peticiones
+// inutiles por frame, sin ganar nada de latencia.
+//
+// Esto NO reduce la latencia percibida. El overlay siempre va a tener hasta un
+// ciclo de inferencia de retraso porque la inferencia es de 3.4 s: la deteccion
+// que se ve es la de hace 3-4 segundos, no la del instante. Es una limitacion
+// del modelo en este microcontrolador, no del polling.
+const POLL_MS = 3800;
+
+// Dibuja un esqueleto. Devuelve cuantos keypoints se pintaron.
+function drawSkeleton(det, view) {
+  const kpts = det.kpts;
+  if (!Array.isArray(kpts) || kpts.length === 0) return 0;
+
+  // Proyectar a pixeles de pantalla una sola vez.
+  const px = new Array(kpts.length);
+  const py = new Array(kpts.length);
+  const vis = new Array(kpts.length);
+  let visibleCount = 0;
+  for (let i = 0; i < kpts.length; i++) {
+    const k = kpts[i];
+    px[i] = view.offsetX + k[0] * view.scaleX;
+    py[i] = view.offsetY + k[1] * view.scaleY;
+    vis[i] = (typeof k[2] === 'number') ? k[2] : 0;
+    if (vis[i] >= KPT_VIS_TH) visibleCount++;
   }
+
+  // 1) Segmentos. Solo si AMBOS extremos son visibles.
+  ctx.lineCap = 'round';
+  ctx.lineWidth = 4;
+  for (const [a, b] of SKELETON) {
+    if (a >= px.length || b >= px.length) continue;
+    if (vis[a] < KPT_VIS_TH || vis[b] < KPT_VIS_TH) continue;
+    const cx = (px[a] + px[b]) / 2;
+    ctx.strokeStyle = KPT_COLORS[a] || KPT_COLORS[0];
+    ctx.beginPath();
+    ctx.moveTo(px[a], py[a]);
+    ctx.lineTo(px[b], py[b]);
+    ctx.stroke();
+  }
+
+  // 2) Puntos. Radio segun cuan visible es, para que un keypoint al limite
+  //    se vea como "poco fiable" y no como igual de firme que el resto.
+  for (let i = 0; i < px.length; i++) {
+    if (vis[i] < KPT_VIS_TH) continue;
+    const t = Math.min(1, (vis[i] - KPT_VIS_TH) / (1 - KPT_VIS_TH));
+    const r = 3 + 2 * t;
+    ctx.fillStyle = KPT_COLORS[i] || KPT_COLORS[0];
+    ctx.beginPath();
+    ctx.arc(px[i], py[i], r, 0, Math.PI * 2);
+    ctx.fill();
+    // Contorno oscuro para que el punto se lea sobre cualquier fondo.
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.stroke();
+  }
+
+  // 3) Caja de la deteccion. Con este modelo los keypoints llegan a 3 de 6
+  // visibles, y entonces el abanico queda ralo: la caja es la referencia de que
+  // HAY una deteccion aunque el esqueleto no se complete. Se sube la opacidad
+  // porque al 35% sobre video era practicamente invisible.
+  if (det.box) {
+    ctx.strokeStyle = 'rgba(0, 255, 136, 0.75)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(
+      view.offsetX + det.box[0] * view.scaleX,
+      view.offsetY + det.box[1] * view.scaleY,
+      det.box[2] * view.scaleX,
+      det.box[3] * view.scaleY
+    );
+    ctx.setLineDash([]);
+  }
+
+  return visibleCount;
+}
+
+// Escala del lienzo respecto a la imagen, saltando las barras negras de
+// letterbox/pillarbox.
+function computeViewTransform() {
+  const imgRect = camView.getBoundingClientRect();
+  const containerWidth = imgRect.width || 1;
+  const containerHeight = imgRect.height || 1;
+  const imgRatio = currentVideoWidth / currentVideoHeight;
+  const containerRatio = containerWidth / containerHeight;
+
+  let renderWidth, renderHeight, offsetX = 0, offsetY = 0;
+  if (containerRatio > imgRatio) {
+    renderHeight = containerHeight;
+    renderWidth = renderHeight * imgRatio;
+    offsetX = (containerWidth - renderWidth) / 2;
+  } else {
+    renderWidth = containerWidth;
+    renderHeight = renderWidth / imgRatio;
+    offsetY = (containerHeight - renderHeight) / 2;
+  }
+  return {
+    offsetX,
+    offsetY,
+    scaleX: renderWidth / currentVideoWidth,
+    scaleY: renderHeight / currentVideoHeight,
+  };
+}
+
+async function fetchAndDrawDetections() {
+  if (!streamActive) return;
   try {
-    const response = await fetch('/api/detections');
+    const response = await fetch('/api/detections', { cache: 'no-store' });
     if (!response.ok) return;
     const data = await response.json();
     const dets = data.detections || [];
-    
-    // Actualizar resoluciones del modelo dinámicamente según el JSON [cite: 381]
+
     const origWidth = data.orig_width || 640;
     const origHeight = data.orig_height || 480;
-
-    // Si la resolución cambió, reajustamos el lienzo
     if (origWidth !== currentVideoWidth || origHeight !== currentVideoHeight) {
       currentVideoWidth = origWidth;
       currentVideoHeight = origHeight;
       resizeCanvas();
     }
-    
+
     ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    if (dets.length === 0) return;
 
-    if (dets.length === 0) {
-      return;
-    }
+    const view = computeViewTransform();
 
-    const imgRect = camView.getBoundingClientRect();
-    const containerWidth = imgRect.width;
-    const containerHeight = imgRect.height;
+    for (const det of dets) {
+      const drawn = drawSkeleton(det, view);
 
-    // --- CÁLCULO DE COMPENSACIÓN DE ASPECT RATIO (Mapeo Inteligente) ---
-    const imgRatio = origWidth / origHeight;
-    const containerRatio = containerWidth / containerHeight;
-    
-    let renderWidth, renderHeight;
-    let offsetX = 0;
-    let offsetY = 0;
-
-    if (containerRatio > imgRatio) {
-      // Caso Pillarbox: Barras negras a la izquierda y derecha
-      renderHeight = containerHeight;
-      renderWidth = renderHeight * imgRatio;
-      offsetX = (containerWidth - renderWidth) / 2;
-    } else {
-      // Caso Letterbox: Barras negras arriba y abajo
-      renderWidth = containerWidth;
-      renderHeight = renderWidth / imgRatio;
-      offsetY = (containerHeight - renderHeight) / 2;
-    }
-
-    // Escalas calculadas sobre la imagen real proyectada (sin las barras negras)
-    const scaleX = renderWidth / origWidth;
-    const scaleY = renderHeight / origHeight;
-
-    // Dibujar cada detección proyectada
-    dets.forEach(det => {
-      // Sumamos los offsets para saltar las barras negras y centrar la caja [cite: 381]
-      const x = offsetX + (det.x * scaleX);
-      const y = offsetY + (det.y * scaleY);
-      const w = det.w * scaleX;
-      const h = det.h * scaleY;
-
-      if (w <= 0 || h <= 0 || isNaN(w) || isNaN(h)) {
-        return;
-      }
-
-      // 1. Dibujar Bounding Box [cite: 381]
-      ctx.strokeStyle = '#00ff00'; // Verde brillante
-      ctx.lineWidth = 3;
-      ctx.strokeRect(x, y, w, h);
-
-      // 2. Dibujar Etiqueta con Score [cite: 381]
-      const scorePercent = (det.score * 100).toFixed(0);
-      const labelText = `Rostro: ${scorePercent}%`;
-      
+      // Etiqueta: clase, score y cuantos keypoints se vieron de verdad. Un
+      // "0/17 visibles" con un score alto es la senal de que el threshold de
+      // visibilidad esta demasiado alto o de que la persona esta de perfil.
+      const scorePct = (det.score * 100).toFixed(0);
+      const label = `${det.class_name || 'mano'} ${scorePct}% ${drawn}/${NUM_KPT}`;
       ctx.font = 'bold 12px sans-serif';
-      const textWidth = ctx.measureText(labelText).width;
-      const labelHeight = 18;
-
-      // Fondo de la etiqueta [cite: 381]
-      ctx.fillStyle = 'rgba(0, 255, 0, 0.8)';
-      ctx.fillRect(x - 1.5, y - labelHeight, textWidth + 10, labelHeight);
-
-      // Texto de la etiqueta [cite: 381]
-      ctx.fillStyle = '#000000';
-      ctx.fillText(labelText, x + 3, y - 5);
-    });
-
+      const textW = ctx.measureText(label).width;
+      const bx = view.offsetX + det.box[0] * view.scaleX;
+      const by = view.offsetY + det.box[1] * view.scaleY;
+      const labelH = 18;
+      const labelY = by - labelH >= 0 ? by - labelH : by;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.fillRect(bx - 1.5, labelY, textW + 10, labelH);
+      ctx.fillStyle = drawn > 0 ? '#00ff88' : '#ff6b6b';
+      ctx.fillText(label, bx + 3, labelY + 13);
+    }
   } catch (e) {
-    console.error('❌ Error en fetchAndDrawDetections:', e);
+    console.error('Error en fetchAndDrawDetections:', e);
   }
 }
 
-  setInterval(fetchAndDrawDetections, 500);
+let pollTimer = null;
+
+function startDetections() {
+  if (pollTimer !== null) return;
+  pollTimer = setInterval(fetchAndDrawDetections, POLL_MS);
+  fetchAndDrawDetections();
 }
+
+function stopDetections() {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+}
+}   // fin de initCameraPage()
 
 function initConfigPage() {
   const useDhcp = document.getElementById('use-dhcp');

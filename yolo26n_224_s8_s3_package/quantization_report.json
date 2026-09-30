@@ -2,7 +2,7 @@
   "weights": "/content/drive/MyDrive/Colab Notebooks/EntrenamientoYOLO262/weights/best.pt",
   "mode": "full",
   "target": "esp32s3",
-  "input_size": 320,
+  "input_size": 224,
   "device_used": "cuda",
   "package_versions": {
     "torch": "2.9.1",
@@ -46,11 +46,11 @@
   ],
   "onnx_calibration_layout": "NCHW",
   "esp_dl_runtime_layout": "NHWC para el procesador YOLO26 oficial",
-  "model_file": "/content/drive/MyDrive/Colab Notebooks/output/yolo26n_320_s8_s3.espdl",
-  "model_size_bytes": 2920048,
+  "model_file": "/content/drive/MyDrive/Colab Notebooks/output/yolo26n_224_s8_s3.espdl",
+  "model_size_bytes": 2913376,
   "current_app_partition_bytes": 5242880,
   "fits_current_app_partition": true,
-  "model_sha256": "6cfe13088f7ad115ac14045badda034c06cdd6f401a431783de2308f043a6f82",
+  "model_sha256": "f352a49298329b4e6ba713601801ade5fa28040c4c95d647cc02c886dc36e9cd",
   "esp_dl_runtime_requirement": "ESP-DL >= 3.3.11 (3.3.12 recomendado) para el formato/tutorial YOLO26 actual",
   "emulated_evaluation": "no ejecutada",
   "firmware_compatibility_warning": "El firmware actual del proyecto espera una salida output0 y preprocesado manual; este modelo oficial expone seis salidas one2one_* y requiere el procesador YOLO26 de ESP-DL."

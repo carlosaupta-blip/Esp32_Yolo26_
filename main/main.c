@@ -26,22 +26,50 @@
 
 static const char *TAG = "main";
 QueueHandle_t yolo_frame_queue = NULL;
-float yolo_threshold = 0.1f;
+/* Umbral de confianza por defecto.
+ *
+ * BAJADO de 0.10 a 0.05 por medicion, no por gusto. En el dispositivo este
+ * modelo de POSE apenas llega a 0.15 de score en una deteccion real, y con 0.10
+ * no llegaba a publicar nada: el log daba "2 candidatas" y "0 detecciones" con la
+ * misma imagen. Con 0.05 las dos salen.
+ *
+ * Ojo con lo que eso significa: un score maximo de 0.15 es un modelo POCO
+ * confiado, no un firmware mal calibrado. Las etiquetas de entrenamiento traen
+ * la caja de la mano ocupando ~89% del ancho de la imagen (w=0.8866 en
+ * valid/labels), o sea primeros planos. Si en la prueba la mano no llena el
+ * cuadro, el modelo no la reconoce. La solucion es reentrenar con encuadres
+ * parecidos a los del despliegue, no bajar mas el umbral. */
+float yolo_threshold = 0.05f;
 
-/* Numero maximo de detecciones que se conservan y se publican.
+/* Numero maximo de detecciones de POSE que se conservan y se publican.
  *
  * Antes esto era un unico `yolo_detection_t best_detection` mas un bool
  * `has_detection`: la tarea de inferencia recorria las N detecciones que
  * devolvia YOLO26, se quedaba con la de mayor score y tiraba el resto. El
- * post-proceso de ESP-DL es NMS-free y su top-K (kTargetK = 32 en
- * yolo_bridge.cpp) ya decide que es una deteccion real y cual no, asi que
- * descartar las demas era una limitacion del firmware y no del modelo.
+ * post-proceso de ESP-DL es NMS-free y su top-K (kTargetK = 8 en
+ * yolo_bridge.cpp) ya decide que es una deteccion real y cual no.
  *
- * 10 es el tope practico: el puente entrega hasta max_results y cada
- * deteccion ocupa ~77 bytes en el JSON (ver detections_get_handler). */
-#define MAX_DETECTIONS 10
-static yolo_detection_t s_detections[MAX_DETECTIONS];
+ * Una deteccion de POSE lleva 6 keypoints y ocupa ~152 bytes en el JSON,
+ * frente a los ~77 de una caja simple. Con 8 detecciones el cuerpo ronda
+ * 1.3 KB, que es lo que cabe en DETECTIONS_JSON_BYTES con margen de sobra.
+ *
+ * Para manos, 8 es un tope holgado: en un encuadre normal hay una o dos, y
+ * por encima de eso los keypoints son tan pequenos que el esqueleto ya no
+ * aporta nada legible. */
+#define MAX_DETECTIONS 8
+static yolo_pose_t s_detections[MAX_DETECTIONS];
 static int s_detection_count = 0;
+
+/* Tamano del buffer donde se arma el JSON de /api/detections.
+ *
+ * 2048 B con 8 detecciones de pose (6 kpts cada una) + caja + cabecera:
+ *   8 * ~152 = 1216, mas ~51 de envoltura = ~1267. Deja ~780 B de margen.
+ * MEDIDO con el simulador del JSON: 1, 2, 3 y 8 detecciones salen validos y
+ * parsean; a partir de ahi el codigo trunca limpio sin partir el JSON.
+ * Si se sube MAX_DETECTIONS, hay que subir esto en la misma proporcion.
+ * El buffer es de PILA a proposito: la tarea de httpd tiene 8192 B de stack
+ * (web_server.c:230), asi que 2048 deja 6 KB para el resto del handler. */
+#define DETECTIONS_JSON_BYTES 2048
 
 static int last_orig_w = 640;
 static int last_orig_h = 480;
@@ -55,14 +83,14 @@ static esp_err_t detections_get_handler(httpd_req_t *req) {
      * mutex permitiria que la tarea de YOLO los reescribiera a mitad de la
      * respuesta, y el array contendria detecciones de dos inferencias
      * distintas mezcladas. */
-    yolo_detection_t dets[MAX_DETECTIONS];
+    yolo_pose_t dets[MAX_DETECTIONS];
     int count = 0;
     int orig_w = 640, orig_h = 480;
 
     if (xSemaphoreTake(detections_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         count = s_detection_count;
         if (count > MAX_DETECTIONS) count = MAX_DETECTIONS;
-        memcpy(dets, s_detections, (size_t)count * sizeof(yolo_detection_t));
+        memcpy(dets, s_detections, (size_t)count * sizeof(yolo_pose_t));
         orig_w = last_orig_w;
         orig_h = last_orig_h;
         xSemaphoreGive(detections_mutex);
@@ -88,7 +116,7 @@ static esp_err_t detections_get_handler(httpd_req_t *req) {
     // mitad: si no cabe la siguiente, se cierra el array limpio y se avisa con
     // un log. Recortar a lo bruto produciria JSON invalido y la UI dejaria de
     // dibujar del todo.
-    char body[1400];
+    char body[DETECTIONS_JSON_BYTES];
     size_t used;
     int written = 0;
     int n;
@@ -100,15 +128,45 @@ static esp_err_t detections_get_handler(httpd_req_t *req) {
     }
     used = (size_t)n;
 
+    // Cada deteccion se arma en un buffer local y solo se copia al cuerpo si
+    // cabe COMPLETA. Asi el JSON nunca queda partido por la mitad: si no cabe
+    // la siguiente, se cierra el array limpio y se avisa con un log. Cortar a
+    // lo bruto produciria JSON invalido y la UI dejaria de dibujar del todo.
+    //
+    // El keypoint se serializa como [x,y,vis] con x e y en pixeles enteros: la
+    // UI los pinta en un canvas, asi que la precision decimal es waste, y con
+    // 6 keypoints por deteccion la diferencia de bytes es apreciable.
     for (int i = 0; i < count; i++) {
-        char entry[128];
-        int len = snprintf(entry, sizeof(entry),
-                           "%s{\"x\":%.1f,\"y\":%.1f,\"w\":%.1f,\"h\":%.1f,"
-                           "\"score\":%.4f,\"class_id\":%d}",
-                           (i == 0) ? "" : ",",
-                           (double)dets[i].x, (double)dets[i].y,
-                           (double)dets[i].w, (double)dets[i].h,
-                           (double)dets[i].score, dets[i].class_id);
+        char entry[512];
+        int len = 0;
+        const yolo_pose_t *d = &dets[i];
+
+        // class_name va en el JSON para que la UI no tenga que adivinar. Los
+        // nombres vienen de kPoseClasses, que yolo_init() ya valido contra la
+        // forma de one2one_p3_cls, asi que no pueden estar desfasados.
+        len += snprintf(entry + len, sizeof(entry) - (size_t)len,
+                        "%s{\"score\":%.4f,\"class_id\":%d,"
+                        "\"class_name\":\"%s\","
+                        "\"box\":[%.1f,%.1f,%.1f,%.1f],\"kpts\":[",
+                        (i == 0) ? "" : ",",
+                        (double)d->score, d->class_id,
+                        yolo_get_class_name(d->class_id),
+                        (double)d->x, (double)d->y, (double)d->w, (double)d->h);
+
+        int emitted = 0;
+        for (int k = 0; k < d->num_kpts && k < yolo_get_num_keypoints(); k++) {
+            // Cada keypoint ocupa como maximo "[65535,65535,1.00]," = 20 chars.
+            if (len + 20 >= (int)sizeof(entry)) {
+                break;
+            }
+            len += snprintf(entry + len, sizeof(entry) - (size_t)len,
+                            "%s[%d,%d,%.2f]",
+                            (emitted == 0) ? "" : ",",
+                            (int)d->kpt_x[k], (int)d->kpt_y[k], (double)d->kpt_v[k]);
+            emitted++;
+        }
+        len += snprintf(entry + len, sizeof(entry) - (size_t)len, "]}");
+
         if (len < 0) break;
         // +64 reserva el cierre '],"orig_width":N,"orig_height":N}'
         if (used + (size_t)len + 64 >= sizeof(body)) break;
@@ -147,8 +205,8 @@ static esp_err_t detections_get_handler(httpd_req_t *req) {
  * (10 elementos, coste irrelevante) deja el contrato claro para la UI, que
  * dibuja en orden y quiere ver la mas fuerte encima. */
 static int compare_detections(const void *a, const void *b) {
-    const yolo_detection_t *da = (const yolo_detection_t *)a;
-    const yolo_detection_t *db = (const yolo_detection_t *)b;
+    const yolo_pose_t *da = (const yolo_pose_t *)a;
+    const yolo_pose_t *db = (const yolo_pose_t *)b;
     if (da->score > db->score) return -1;
     if (da->score < db->score) return 1;
     return 0;
@@ -176,9 +234,12 @@ static void yolo_inference_task(void *arg) {
         vTaskDelete(NULL);
         return;
     }
+    const size_t rgb_buffer_size = (size_t)max_w * (size_t)max_h * 3u;
+    ESP_LOGI(TAG, "Buffer RGB: %u bytes en PSRAM para hasta %dx%d",
+             (unsigned)rgb_buffer_size, max_w, max_h);
 
     const int max_detections = MAX_DETECTIONS;
-    yolo_detection_t detections[max_detections];
+    yolo_pose_t detections[max_detections];
     yolo_frame_t frame;
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -194,6 +255,35 @@ static void yolo_inference_task(void *arg) {
 
         if (xQueueReceive(yolo_frame_queue, &frame, 0) == pdTRUE) {
             if (frame.buf && frame.len > 0) {
+                /* GUARDIA DE TAMANO. rgb_buffer se reservo una sola vez para
+                 * 640x480x3, pero la resolucion de la camara se cambia en
+                 * caliente desde la UI y fmt2rgb888 escribe segun las
+                 * dimensiones REALES del JPEG, no segun las del buffer:
+                 *
+                 *   FRAMESIZE_SVGA  800x600    1.44 MB   <- desborda
+                 *   FRAMESIZE_XGA  1024x768   2.36 MB   <- desborda
+                 *   FRAMESIZE_HD   1280x720   2.76 MB   <- desborda
+                 *   FRAMESIZE_UXGA 1600x1200  5.76 MB   <- desborda
+                 *
+                 * Escribiendo de mas en ese buffer se pisa el heap, y el
+                 * siguiente crash aparece en el driver de WiFi (ppResortTxAMPDU
+                 * con LoadProhibited), muy lejos de la causa real. El salto de
+                 * FRAMESIZE en caliente tampoco es inocuo: el driver puede
+                 * reiniciarse por dentro y deja frames a medias.
+                 *
+                 * Se descarta el frame, no se redimensiona nada: es el camino
+                 * barato y el que no toca memoria. */
+                const size_t needed = (size_t)frame.width * (size_t)frame.height * 3u;
+                if (frame.width > max_w || frame.height > max_h || needed > rgb_buffer_size) {
+                    ESP_LOGW(TAG, "Frame %dx%d descartado: el buffer RGB es de %dx%d "
+                                   "(hacen falta %u bytes y hay %u). Baja la resolucion "
+                                   "de la camara a VGA o menor.",
+                             frame.width, frame.height, max_w, max_h,
+                             (unsigned)needed, (unsigned)rgb_buffer_size);
+                    free(frame.buf);
+                    continue;
+                }
+
                 // Decodificar JPEG a RGB888
                 int64_t t_mark = esp_timer_get_time();
                 bool ok = fmt2rgb888(frame.buf, frame.len, PIXFORMAT_JPEG, rgb_buffer);
@@ -251,10 +341,10 @@ static void yolo_inference_task(void *arg) {
                         // descartaban todas menos la de mayor score.
                         int keep = (n > max_detections) ? max_detections : n;
                         if (keep > 1) {
-                            qsort(detections, (size_t)keep, sizeof(yolo_detection_t),
+                            qsort(detections, (size_t)keep, sizeof(yolo_pose_t),
                                   compare_detections);
                         }
-                        memcpy(s_detections, detections, (size_t)keep * sizeof(yolo_detection_t));
+                        memcpy(s_detections, detections, (size_t)keep * sizeof(yolo_pose_t));
                         s_detection_count = keep;
 
                         if (keep > 0) {
@@ -263,12 +353,26 @@ static void yolo_inference_task(void *arg) {
                                      src_w, src_h, keep, yolo_threshold,
                                      detections[0].score * 100.0f);
                             for (int i = 0; i < keep; i++) {
+                                // Contar keypoints visibles: es la unica forma
+                                // rapida de distinguir "detecto a la persona pero
+                                // el esqueleto salio vacio" (umbral de
+                                // visibilidad alto, o rostro de perfil) de
+                                // "detecto otra cosa".
+                                int visible = 0;
+                                const int nk = detections[i].num_kpts;
+                                for (int k = 0; k < nk; k++) {
+                                    if (detections[i].kpt_v[k] >= 0.5f) {
+                                        visible++;
+                                    }
+                                }
                                 ESP_LOGI(TAG, "   [%d] clase=%d score=%.3f "
-                                              "[x:%.1f, y:%.1f, w:%.1f, h:%.1f]",
+                                              "[x:%.1f, y:%.1f, w:%.1f, h:%.1f] "
+                                              "keypoints visibles: %d/%d",
                                               i, detections[i].class_id,
                                               detections[i].score,
                                               detections[i].x, detections[i].y,
-                                              detections[i].w, detections[i].h);
+                                              detections[i].w, detections[i].h,
+                                              visible, nk);
                             }
                         } else {
                             ESP_LOGD(TAG, "❌ Sin detecciones sobre umbral %.2f", yolo_threshold);
